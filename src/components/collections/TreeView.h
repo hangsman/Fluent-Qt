@@ -347,6 +347,14 @@ private:
 
     // --- Selected indicator pill geometry / painting ---
     QRectF selectedIndicatorBaseRect(const QModelIndex& index) const;
+    // Rows after an animating subtree are painted shifted up, so the pill has to follow the
+    // painted row rather than the post-expansion layout rect.
+    // zh_CN: 展开/收起期间子树之后的行按向上平移的位置绘制，指示器要跟随绘制位置而非展开后的布局位置。
+    int indicatorRowRevealOffset(const QModelIndex& index) const;
+    // A previous row can already be scrolled out of the viewport; keep a clamped edge anchor so
+    // the pill still travels instead of snapping straight to the target.
+    // zh_CN: 上一行可能已滚出视口；保留贴边锚点，让指示器仍然平滑移动，而不是直接闪到目标行。
+    QRectF indicatorOffscreenAnchorRect(const QModelIndex& index) const;
     QRectF currentSelectedIndicatorRect() const;
     void paintSelectedIndicator(QPainter& painter) const;
     // Hidden backgrounds expose the parent surface, so their animation frames

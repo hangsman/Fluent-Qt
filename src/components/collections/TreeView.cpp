@@ -616,7 +616,9 @@ QRectF TreeView::selectedIndicatorRect(qreal progress) const
         return target;
     }
 
-    const QRectF previous = selectedIndicatorBaseRect(QModelIndex(m_previousIndicatorIndex));
+    QRectF previous = selectedIndicatorBaseRect(QModelIndex(m_previousIndicatorIndex));
+    if (previous.isEmpty()) // keep motion when the old row left the viewport
+        previous = indicatorOffscreenAnchorRect(QModelIndex(m_previousIndicatorIndex));
     if (previous.isEmpty())
         return target;
     if (qFuzzyCompare(clampedProgress + 1.0, 1.0))
@@ -1660,13 +1662,58 @@ QRectF TreeView::selectedIndicatorBaseRect(const QModelIndex& index) const
         return {};
 
     const QRect itemRect = visualRect(index);
-    if (itemRect.isEmpty() || !viewport()->rect().intersects(itemRect))
+    if (itemRect.isEmpty())
         return {};
 
-    const QRectF itemRectF(itemRect);
+    // 展开/收起期间，子树之后的行按平移后的位置绘制；几何也要跟着平移，否则指示器起点会偏离实际像素。
+    const QRect paintedRect = itemRect.translated(0, indicatorRowRevealOffset(index));
+    if (!viewport()->rect().intersects(paintedRect))
+        return {};
+
+    const QRectF itemRectF(paintedRect);
     const qreal x = itemRect.left() + indicatorInsetForIndex(index, m_selectionIndicatorStyle);
     const qreal y = itemRectF.top() + itemRectF.height() / 2.0 - m_selectionIndicatorStyle.height / 2.0;
     return QRectF(x, y, m_selectionIndicatorStyle.width, m_selectionIndicatorStyle.height);
+}
+
+int TreeView::indicatorRowRevealOffset(const QModelIndex& index) const
+{
+    if (!index.isValid() || !m_animParent.isValid() || !m_expandRevealAnim
+        || m_expandRevealAnim->state() != QAbstractAnimation::Running || m_animSubtreeHeight <= 0.0)
+        return 0;
+
+    const QModelIndex parent = QModelIndex(m_animParent);
+    const QRect parentRect = visualRect(parent);
+    const QRect rowRect = visualRect(index);
+    if (parentRect.isEmpty() || rowRect.isEmpty())
+        return 0;
+
+    // Only rows after the animating subtree are translated, mirroring drawRow().
+    // zh_CN: 只有动画子树之后的行会被平移，与 drawRow() 的判定保持一致。
+    if (index == parent || isDescendantOf(index, parent) || rowRect.top() < parentRect.bottom())
+        return 0;
+
+    const qreal progress = qBound(0.0, m_expandRevealAnim->currentValue().toReal(), 1.0);
+    return -qRound(m_animSubtreeHeight * (1.0 - progress));
+}
+
+QRectF TreeView::indicatorOffscreenAnchorRect(const QModelIndex& index) const
+{
+    if (!index.isValid() || index.model() != model() || !viewport() || !isIndicatorEndpointUsable(index))
+        return {};
+
+    const QRect itemRect = visualRect(index);
+    const QRect viewRect = viewport()->rect();
+    if (itemRect.isEmpty() || viewRect.height() < m_selectionIndicatorStyle.height)
+        return {};
+
+    // 行已离开视口：把药丸钳在最近的视口边缘，保留「从旧行滑向新行」的连续位移。
+    const qreal half = m_selectionIndicatorStyle.height / 2.0;
+    const qreal minCenter = viewRect.top() + half;
+    const qreal maxCenter = qMax(minCenter, viewRect.bottom() + 1.0 - half);
+    const qreal centerY = qBound(minCenter, static_cast<qreal>(itemRect.center().y()), maxCenter);
+    const qreal x = itemRect.left() + indicatorInsetForIndex(index, m_selectionIndicatorStyle);
+    return QRectF(x, centerY - half, m_selectionIndicatorStyle.width, m_selectionIndicatorStyle.height);
 }
 
 QRectF TreeView::currentSelectedIndicatorRect() const
