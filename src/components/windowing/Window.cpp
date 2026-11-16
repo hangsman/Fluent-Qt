@@ -111,6 +111,7 @@ Window::Window(QWidget* parent)
         setAttribute(Qt::WA_TranslucentBackground, true);
     prepareBackdropSurface();
     m_chrome.applyPlatformWindowFlags();
+    compatibility::detail::installPlatformWindowQuitTransition(this);
 
     setAutoFillBackground(false);
     setMinimumSize(Breakpoints::MinWindowWidth, Breakpoints::MinWindowHeight);
@@ -530,6 +531,11 @@ void Window::minimizeWindow()
     emit minimizeRequested();
     if (!guard)
         return;
+    // Arm the native transition immediately before the state change; an
+    // application handler above may run a nested event loop.
+    // zh_CN: 在真正改变状态前一刻补上原生过渡样式；上方的应用处理器可能进入嵌套事件循环。
+    if (m_chrome.usesCustomWindowChrome())
+        compatibility::detail::beginPlatformWindowTransition(guard);
     if (usesHostedWindowSurface())
         guard->hide();
     else
@@ -539,10 +545,20 @@ void Window::minimizeWindow()
 void Window::toggleMaximizeRestore()
 {
     QPointer<Window> guard(this);
-    if (isEffectivelyMaximized()) {
+    const bool restoring = isEffectivelyMaximized();
+    if (restoring) {
         emit restoreRequested();
-        if (!guard)
-            return;
+    } else {
+        emit maximizeRequested();
+    }
+    if (!guard)
+        return;
+    // Arm the native transition immediately before the state change; an
+    // application handler above may run a nested event loop.
+    // zh_CN: 在真正改变状态前一刻补上原生过渡样式；上方的应用处理器可能进入嵌套事件循环。
+    if (m_chrome.usesCustomWindowChrome())
+        compatibility::detail::beginPlatformWindowTransition(guard);
+    if (restoring) {
         if (usesHostedWindowSurface()) {
             QRect restore = m_hostedRestoreGeometry;
             if (!restore.isValid() && parentWidget()) {
@@ -557,9 +573,6 @@ void Window::toggleMaximizeRestore()
             guard->showNormal();
         }
     } else {
-        emit maximizeRequested();
-        if (!guard)
-            return;
         if (usesHostedWindowSurface() && parentWidget()) {
             m_hostedRestoreGeometry = geometry();
             guard->setGeometry(parentWidget()->rect());
@@ -773,6 +786,13 @@ void Window::setVisible(bool visible)
     const Qt::WindowStates state = windowState();
     const bool showingMaximized = visible && isWindow() && !isVisible() && state.testFlag(Qt::WindowMaximized)
         && !(state & (Qt::WindowMinimized | Qt::WindowFullScreen));
+    // Prepare the native caption while the window is still hidden so the
+    // platform can create its frame and shadow before showing it. The platform
+    // releases the style once the appearance settles.
+    // zh_CN: 窗口仍隐藏时先准备原生 caption，让平台在显示前完成窗框和阴影；
+    // 出现过渡落定后由平台释放该样式。
+    if (visible && isWindow() && !isVisible() && m_chrome.usesCustomWindowChrome())
+        compatibility::detail::beginPlatformWindowTransition(this);
     QWidget::setVisible(visible);
     if (showingMaximized && isVisible())
         compatibility::detail::restorePlatformMaximizedFrame(this);

@@ -108,6 +108,16 @@ bool requestPlatformForegroundActivation(QWidget* window)
     return false;
 }
 
+void beginPlatformWindowTransition(QWidget* window)
+{
+    Q_UNUSED(window);
+}
+
+void installPlatformWindowQuitTransition(QWidget* window)
+{
+    Q_UNUSED(window);
+}
+
 bool restorePlatformMaximizedFrame(QWidget* window)
 {
     Q_UNUSED(window);

@@ -10,6 +10,7 @@
 #include <dwmapi.h>
 
 #include <QtMath>
+#include <QCoreApplication>
 #include <QGuiApplication>
 #include <QEnterEvent>
 #include <QMouseEvent>
@@ -37,6 +38,15 @@
 #ifndef DWMSBT_TRANSIENTWINDOW
 #define DWMSBT_TRANSIENTWINDOW 3 // Acrylic
 #endif
+#ifndef DWMWA_NCRENDERING_POLICY
+#define DWMWA_NCRENDERING_POLICY 2
+#endif
+#ifndef DWMNCRP_DISABLED
+#define DWMNCRP_DISABLED 1
+#endif
+#ifndef DWMNCRP_USEWINDOWSTYLE
+#define DWMNCRP_USEWINDOWSTYLE 0
+#endif
 
 namespace compatibility {
 namespace {
@@ -45,6 +55,7 @@ namespace {
 // handling can keep DWM frame geometry synchronized after Qt recreates state.
 // zh_CN: 将扩展客户区的顶部 margin 存到 HWND 上，便于 Qt 重建状态后继续同步 DWM frame 几何。
 constexpr wchar_t ChromeTopMarginProperty[] = L"FluentWindowChromeTopMargin";
+constexpr char WindowTransitionStateProperty[] = "_fluentWindowTransitionState";
 
 struct WindowsVersionInfo {
     DWORD major = 0;
@@ -72,6 +83,15 @@ WindowsVersionInfo currentWindowsVersion()
 bool supportsDwmSystemBackdrop(const WindowsVersionInfo& version)
 {
     return version.valid && (version.major > 10 || (version.major == 10 && version.build >= 22621));
+}
+
+bool isWindows11OrLater()
+{
+    static const bool result = [] {
+        const WindowsVersionInfo version = currentWindowsVersion();
+        return version.valid && version.build >= 22000;
+    }();
+    return result;
 }
 
 bool platformProvidesHwnd()
@@ -187,6 +207,148 @@ template <typename T> T resolveDwmProc(const char* name)
     return reinterpret_cast<T>(GetProcAddress(dwmApi, name));
 }
 
+using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+
+// Several requests can overlap (a tray restore while a hide is still
+// settling, for example). Keep them in one bit mask so every path applies the
+// same native style and one settle pass releases all of them.
+// zh_CN: 多个请求可能重叠（例如隐藏尚未落定就从托盘恢复）；用同一个位掩码记录，
+// 使各路径应用同一样式，并由一次 settle 统一释放。
+enum TransitionFlag : int {
+    TransitionCaption = 1 << 0,           // A state or visibility change still needs WS_CAPTION.
+    TransitionDisablesNonClient = 1 << 1, // Windows 10 hide fade.
+    TransitionSettlePending = 1 << 2,
+};
+
+int windowTransitionState(const QWidget* window)
+{
+    return window ? window->property(WindowTransitionStateProperty).toInt() : 0;
+}
+
+void updateWindowTransitionState(QWidget* window, int set, int clear)
+{
+    if (!window)
+        return;
+    const int state = windowTransitionState(window);
+    const int next = (state | set) & ~clear;
+    if (next != state)
+        window->setProperty(WindowTransitionStateProperty, next);
+}
+
+bool requestsTransitionCaption(const QWidget* window)
+{
+    return (windowTransitionState(window) & TransitionCaption) != 0;
+}
+
+bool disablesNonClientRendering(const QWidget* window)
+{
+    return (windowTransitionState(window) & TransitionDisablesNonClient) != 0;
+}
+
+UINT windowTransitionSettledMessage()
+{
+    // A posted message runs after the system command that started the transition,
+    // so the caption style stays in place while DWM decides to animate.
+    // zh_CN: 投递消息会在启动过渡的系统命令之后处理，确保 DWM 决定动画时 caption 样式仍然存在。
+    static const UINT id = RegisterWindowMessageW(L"FluentQt.WindowTransitionSettled");
+    return id;
+}
+
+bool isWindowTransitionCommand(WPARAM command)
+{
+    const WPARAM base = command & 0xFFF0;
+    return base == SC_MINIMIZE || base == SC_MAXIMIZE || base == SC_RESTORE || base == SC_CLOSE;
+}
+
+void applyTransitionCaption(QWidget* window, bool recomputeFrame)
+{
+    HWND hwnd = hwndForWindow(window);
+    if (!hwnd)
+        return;
+
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    const LONG_PTR desired = requestsTransitionCaption(window) ? (style | WS_CAPTION) : (style & ~WS_CAPTION);
+    if (desired == style)
+        return;
+
+    SetWindowLongPtrW(hwnd, GWL_STYLE, desired);
+    // Recomputing the frame is only safe outside a native position change;
+    // re-entering SetWindowPos from WM_WINDOWPOSCHANGING would submit the
+    // change that is already in flight.
+    // zh_CN: 只有在原生位置变化之外重算窗框才安全；若在 WM_WINDOWPOSCHANGING
+    // 内重入 SetWindowPos，会重复提交正在进行的显隐变化。
+    if (recomputeFrame)
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void syncNativeNonClientRendering(QWidget* window)
+{
+    // Windows 10 paints the temporary caption style's system title bar above
+    // the client-side frame while a window fades out. Disable DWM's non-client
+    // rendering for that hide only; the shadow needs it enabled during shows.
+    // zh_CN: Windows 10 会在窗口淡出期间于客户端标题栏上方绘制系统标题栏，仅在隐藏阶段
+    // 关闭 DWM 非客户区渲染；显示阶段需要保持开启，否则阴影会整段消失。
+    if (isWindows11OrLater())
+        return;
+    HWND hwnd = hwndForWindow(window);
+    auto* setAttr = resolveDwmProc<DwmSetWindowAttributeFn>("DwmSetWindowAttribute");
+    if (!hwnd || !setAttr)
+        return;
+    const int policy = disablesNonClientRendering(window) ? DWMNCRP_DISABLED : DWMNCRP_USEWINDOWSTYLE;
+    setAttr(hwnd, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
+}
+
+void requestTransitionSettle(QWidget* window)
+{
+    if ((windowTransitionState(window) & TransitionSettlePending) != 0)
+        return;
+    HWND hwnd = hwndForWindow(window);
+    if (!hwnd)
+        return;
+    updateWindowTransitionState(window, TransitionSettlePending, 0);
+    PostMessageW(hwnd, windowTransitionSettledMessage(), 0, 0);
+}
+
+void armVisibilityTransition(QWidget* window, bool hiding)
+{
+    updateWindowTransitionState(window, TransitionCaption, 0);
+    if (hiding) {
+        if (!isWindows11OrLater())
+            updateWindowTransitionState(window, TransitionDisablesNonClient, 0);
+        syncNativeNonClientRendering(window);
+    } else if (disablesNonClientRendering(window)) {
+        // A hide may not have settled yet when the window is shown again in the
+        // same event-loop turn. Restore non-client rendering before this show is
+        // submitted, otherwise its entire appearance animation lacks the shadow.
+        // zh_CN: 同一轮事件循环内重新显示时，上一次隐藏可能尚未落定。必须在提交本次显示前
+        // 恢复非客户区渲染，否则整段显示动画都没有阴影。
+        updateWindowTransitionState(window, 0, TransitionDisablesNonClient);
+        syncNativeNonClientRendering(window);
+    }
+    applyTransitionCaption(window, false);
+}
+
+void settleWindowTransition(QWidget* window, HWND hwnd)
+{
+    updateWindowTransitionState(window, 0, TransitionSettlePending);
+    if (hwnd && IsIconic(hwnd)) {
+        // Keep the caption until the restore finishes so that transition
+        // animates as well. Only the Windows 10 hide policy is released here.
+        // zh_CN: 保留 caption 直到还原完成，使还原过渡同样有动画；此处只释放 Windows 10
+        // 隐藏阶段使用的 DWM 策略。
+        updateWindowTransitionState(window, 0, TransitionDisablesNonClient);
+        syncNativeNonClientRendering(window);
+        return;
+    }
+
+    const bool restoreNonClientRendering = disablesNonClientRendering(window);
+    updateWindowTransitionState(window, 0, TransitionCaption | TransitionDisablesNonClient);
+    applyTransitionCaption(window, true);
+    if (restoreNonClientRendering)
+        syncNativeNonClientRendering(window);
+}
+
 void ensureDwmChromeStyle(QWidget* window)
 {
     HWND hwnd = hwndForWindow(window);
@@ -205,7 +367,10 @@ void ensureDwmChromeStyle(QWidget* window)
     // glass beside overlay scroll bars. WS_THICKFRAME keeps resize behavior.
     // zh_CN: 自绘 chrome 接管整条标题栏。保留 WS_CAPTION 会让旧 DWM 路径在右/底边重绘原生非客户区，
     // 表现为滚动条旁的黑边或玻璃残影。WS_THICKFRAME 继续保留缩放行为。
-    desiredStyle &= ~WS_CAPTION;
+    if (requestsTransitionCaption(window))
+        desiredStyle |= WS_CAPTION;
+    else
+        desiredStyle &= ~WS_CAPTION;
 
     if (desiredStyle == style)
         return;
@@ -654,7 +819,6 @@ applyPlatformSystemBackdrop(QWidget* window, BackdropEffect effect, bool dark, b
         result.reason = QStringLiteral("native-window-unavailable");
         return result;
     }
-    using DwmSetWindowAttributeFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
     auto* setAttr = resolveDwmProc<DwmSetWindowAttributeFn>("DwmSetWindowAttribute");
     const WindowsVersionInfo version = currentWindowsVersion();
     const bool dwmSystemBackdrop = supportsDwmSystemBackdrop(version);
@@ -830,8 +994,50 @@ bool handlePlatformNativeEvent(QWidget* window,
         *result = 1;
         return true;
     }
+    if (msg->message == windowTransitionSettledMessage()) {
+        settleWindowTransition(window, msg->hwnd);
+        *result = 0;
+        return true;
+    }
+
     if (!options.useCustomWindowChrome)
         return false;
+
+    if (msg->message == WM_STYLECHANGING && msg->wParam == static_cast<WPARAM>(GWL_STYLE)
+        && requestsTransitionCaption(window)) {
+        // Qt may reapply its own flags while the transition is running. Keep
+        // the temporary caption style until the settle message removes it.
+        // zh_CN: Qt 可能在过渡期间重新应用自身 flag；保留临时 caption 样式，直到
+        // settle 消息将其移除。
+        auto* style = reinterpret_cast<STYLESTRUCT*>(msg->lParam);
+        if (style)
+            style->styleNew |= WS_CAPTION;
+    }
+
+    if (msg->message == WM_WINDOWPOSCHANGING && msg->lParam) {
+        const UINT flags = reinterpret_cast<WINDOWPOS*>(msg->lParam)->flags;
+        if (flags & (SWP_SHOWWINDOW | SWP_HIDEWINDOW)) {
+            // Windows plays its show/hide transitions only when the window has
+            // a caption style as the visibility change is submitted. Add it
+            // before Qt applies the change; the settle pass removes it after the
+            // change has completed.
+            // zh_CN: Windows 只在提交显示/隐藏变化时带 caption 样式的窗口上播放过渡。
+            // 在 Qt 应用变化前补样式；settle 阶段在变化完成后移除。
+            armVisibilityTransition(window, (flags & SWP_HIDEWINDOW) != 0);
+            requestTransitionSettle(window);
+        }
+    }
+
+    if (msg->message == WM_SYSCOMMAND && isWindowTransitionCommand(msg->wParam)) {
+        beginPlatformWindowTransition(window);
+    }
+
+    if ((msg->message == WM_SIZE || msg->message == WM_WINDOWPOSCHANGED) && requestsTransitionCaption(window)
+        && !IsIconic(msg->hwnd)) {
+        // Covers a restore started through ShowWindow rather than WM_SYSCOMMAND.
+        // zh_CN: 覆盖通过 ShowWindow 而非 WM_SYSCOMMAND 启动的还原。
+        requestTransitionSettle(window);
+    }
 
     if (auto* caption = WindowsCaptionButtonState::find(window)) {
         const QPointer<QWidget> guard(window);
@@ -1016,6 +1222,50 @@ bool requestPlatformForegroundActivation(QWidget* window)
 {
     HWND hwnd = hwndForWindow(window);
     return hwnd && SetForegroundWindow(hwnd) != FALSE;
+}
+
+void beginPlatformWindowTransition(QWidget* window)
+{
+    // Only top-level windows have a native frame whose style drives DWM's
+    // transitions; hosted Window surfaces are plain child widgets.
+    // zh_CN: 只有顶层窗口才有影响 DWM 过渡的原生窗框；被宿主承载的 Window 只是子控件。
+    if (!window || !window->isWindow())
+        return;
+
+    // Windows skips its DWM minimize/maximize/restore/close transitions for a
+    // window without WS_CAPTION. Add the style only for the transition; the
+    // client-side frame still owns every visible pixel. Keep the request even
+    // before the native surface exists: QWidget can create and show the window
+    // in the same call, and the style must be in place for that show.
+    // zh_CN: Windows 只为带 WS_CAPTION 的窗口播放 DWM 最小化/最大化/还原/关闭过渡。
+    // 仅在过渡期间补上该样式，可见像素仍由客户端边框负责。原生 surface 尚未创建时也保留
+    // 请求：QWidget 可能在同一次调用中创建并显示窗口，样式必须在提交显示时已经存在。
+    updateWindowTransitionState(window, TransitionCaption, 0);
+    applyTransitionCaption(window, true);
+    requestTransitionSettle(window);
+}
+
+void installPlatformWindowQuitTransition(QWidget* window)
+{
+    QCoreApplication* app = QCoreApplication::instance();
+    if (!window || !app)
+        return;
+
+    // QCoreApplication::quit() tears the native windows down without a close
+    // event, so DWM never receives the hide that starts its close transition.
+    // Hide the visible top-level window as the application leaves the event
+    // loop. The window owns the connection, so it disappears with the window.
+    // zh_CN: quit() 直接销毁原生窗口，不会产生 close 事件，DWM 收不到启动关闭过渡所需的隐藏
+    // 提交。应用离开事件循环时隐藏可见顶层窗口；连接以窗口为上下文，窗口销毁时自动断开。
+    QObject::connect(
+        app, &QCoreApplication::aboutToQuit, window,
+        [window]() {
+            if (!window->isWindow() || !window->isVisible())
+                return;
+            beginPlatformWindowTransition(window);
+            window->hide();
+        },
+        Qt::DirectConnection);
 }
 
 bool restorePlatformMaximizedFrame(QWidget* window)

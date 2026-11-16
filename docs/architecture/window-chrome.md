@@ -66,6 +66,25 @@ occlusion, one-click commands, drag cancellation and destruction. Those tests do
 not prove that the shell flyout appeared; native desktop review must separately
 check hovering, selecting a layout and restoring the window.
 
+## Native window transitions
+
+Windows plays DWM minimize, maximize, restore and hide transitions only for a
+window that has `WS_CAPTION`. FluentQt's custom chrome normally clears that
+style so Windows never paints a native title bar over the client-side frame.
+The adapter adds it back only while a transition is pending: before state
+changes and show, and inside `WM_WINDOWPOSCHANGING` for show and hide.
+`WM_STYLECHANGING` keeps Qt from clearing it, `WM_NCCALCSIZE` keeps the client
+rectangle unchanged, and a coalesced settle pass removes it once the change
+completes. A minimized window retains it until restored so both directions
+animate.
+
+On Windows 10 the adapter disables DWM non-client rendering only during the
+hide fade; a show that interrupts a pending hide restores the policy first so
+the shadow stays present. Maximize and restore never change the policy, and
+Windows 11 keeps the default. Close, hide, and application quit all submit the
+same hide: each `Window` hides itself on `aboutToQuit`, so applications do not
+need to close the window before calling `quit()`.
+
 ## Typed backdrop state
 
 `BackdropState` deliberately separates intent from what is actually visible:

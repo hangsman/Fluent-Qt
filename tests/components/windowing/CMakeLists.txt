@@ -73,6 +73,16 @@ if(WIN32)
         WindowsSnapLayoutTest.BorrowedControlDeletionAndReplacementClearNativeState windows)
     configure_native_window_desktop_test(
         WindowsWindowOverlayTest.ModalDialogFollowsCaptionMaximizeRestore windows)
+    configure_native_window_desktop_test(
+        WindowsWindowTransitionTest.CaptionStyleFramesStateChangesWithoutMovingClient windows)
+    configure_native_window_desktop_test(
+        WindowsWindowTransitionTest.HideCarriesCaptionForFadeAndReleasesItAfterward windows)
+    configure_native_window_desktop_test(
+        WindowsWindowTransitionTest.VisibleWindowHidesWhenApplicationIsAboutToQuit windows)
+    configure_native_window_desktop_test(
+        WindowsWindowTransitionTest.AppearanceAfterPendingHideRestoresNonClientRenderingFirst windows)
+    configure_native_window_desktop_test(
+        WindowsWindowTransitionTest.ShowCarriesCaptionForAppearanceAndReleasesItAfterward windows)
     if(TARGET FluentQtSpatial)
         target_link_libraries(test_window_win_objects PRIVATE FluentQt::Spatial)
         if(QT_VERSION_MAJOR EQUAL 6)

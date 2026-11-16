@@ -209,7 +209,7 @@ void GalleryApplicationController::applyConfiguredCloseBehavior()
     switch (behavior) {
     case GallerySettings::CloseBehavior::Minimize:
         captureRestoreState();
-        m_window->showMinimized();
+        m_window->minimizeWindow();
         break;
     case GallerySettings::CloseBehavior::Tray:
         captureRestoreState();
@@ -217,7 +217,7 @@ void GalleryApplicationController::applyConfiguredCloseBehavior()
             m_window->hide();
         } else {
             LOG_WARN(QStringLiteral("GalleryApplicationController status area unavailable; minimizing instead"));
-            m_window->showMinimized();
+            m_window->minimizeWindow();
         }
         break;
     case GallerySettings::CloseBehavior::Quit:

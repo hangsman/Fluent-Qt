@@ -41,6 +41,11 @@ using fluent::windowing::Window;
 
 namespace {
 
+constexpr DWORD kDwmwaNcrRenderingEnabled = 1;
+constexpr DWORD kDwmwaNcrRenderingPolicy = 2;
+constexpr DWORD kDwmwaSystemBackdropType = 38;
+constexpr int kDwmNcrpDisabled = 1;
+
 bool hasNativeSnapLayouts()
 {
     return QGuiApplication::platformName() == QLatin1String("windows")
@@ -92,15 +97,72 @@ private:
     compatibility::WindowChromeCompat chrome;
 };
 
-int nativeBackdropType(HWND hwnd)
+int nativeNonClientRenderingPolicy(HWND hwnd);
+
+class HideTransitionProbeWindow final : public Window {
+public:
+    bool showChangeObserved = false;
+    int showSubmissionCount = 0;
+    bool captionPresentAtShowStart = false;
+    bool nonClientRenderingAtShowStart = false;
+    bool hideChangeObserved = false;
+    bool captionPresentAtHideStart = false;
+
+protected:
+    bool nativeEvent(const QByteArray& eventType, void* message, compatibility::FluentNativeEventResult* result)
+        override
+    {
+        const bool handled = Window::nativeEvent(eventType, message, result);
+        if (eventType != "windows_generic_MSG" && eventType != "windows_dispatcher_MSG")
+            return handled;
+        auto* msg = static_cast<MSG*>(message);
+        if (!msg || (msg->message != WM_WINDOWPOSCHANGING && msg->message != WM_WINDOWPOSCHANGED) || !msg->lParam)
+            return handled;
+        const auto* position = reinterpret_cast<WINDOWPOS*>(msg->lParam);
+        const bool showing = (position->flags & SWP_SHOWWINDOW) != 0;
+        const bool hiding = (position->flags & SWP_HIDEWINDOW) != 0;
+        if (!showing && !hiding)
+            return handled;
+
+        const HWND hwnd = reinterpret_cast<HWND>(winId());
+        const bool hasCaption = hwnd && (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == WS_CAPTION;
+        if (showing && msg->message == WM_WINDOWPOSCHANGING) {
+            showChangeObserved = true;
+            ++showSubmissionCount;
+            captionPresentAtShowStart = hasCaption;
+            nonClientRenderingAtShowStart = nativeNonClientRenderingPolicy(hwnd) != kDwmNcrpDisabled;
+        } else if (msg->message == WM_WINDOWPOSCHANGING) {
+            hideChangeObserved = true;
+            captionPresentAtHideStart = hasCaption;
+        }
+        return handled;
+    }
+};
+
+int nativeDwmAttribute(HWND hwnd, DWORD attribute)
 {
     using GetAttribute = HRESULT(WINAPI*)(HWND, DWORD, PVOID, DWORD);
     const auto getAttribute = reinterpret_cast<GetAttribute>(
         GetProcAddress(GetModuleHandleW(L"dwmapi.dll"), "DwmGetWindowAttribute"));
-    int type = -1;
+    int value = -1;
     if (getAttribute)
-        getAttribute(hwnd, 38, &type, sizeof(type));
-    return type;
+        getAttribute(hwnd, attribute, &value, sizeof(value));
+    return value;
+}
+
+int nativeBackdropType(HWND hwnd)
+{
+    return nativeDwmAttribute(hwnd, kDwmwaSystemBackdropType);
+}
+
+int nativeNonClientRenderingPolicy(HWND hwnd)
+{
+    return nativeDwmAttribute(hwnd, kDwmwaNcrRenderingPolicy);
+}
+
+int nativeNonClientRenderingEnabled(HWND hwnd)
+{
+    return nativeDwmAttribute(hwnd, kDwmwaNcrRenderingEnabled);
 }
 
 // Use a real GDI surface so native erase behavior is checked independently of
@@ -500,6 +562,175 @@ TEST(WindowsWindowOverlayTest, ModalDialogFollowsCaptionMaximizeRestore)
         }
     }
     dialog.close();
+    window.close();
+}
+
+TEST(WindowsWindowTransitionTest, CaptionStyleFramesStateChangesWithoutMovingClient)
+{
+    if (QGuiApplication::platformName() != QLatin1String("windows"))
+        GTEST_SKIP() << "Native window transitions require the Windows desktop platform";
+
+    Window window;
+    window.resize(720, 520);
+    window.setCustomWindowChromeEnabled(true);
+    window.show();
+    const HWND showHwnd = reinterpret_cast<HWND>(window.winId());
+    EXPECT_NE(nativeNonClientRenderingEnabled(showHwnd), 0);
+    ASSERT_TRUE(QTest::qWaitForWindowExposed(&window, 2000));
+
+    const HWND hwnd = showHwnd;
+    const auto hasCaption = [hwnd] { return (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == WS_CAPTION; };
+    const auto clientSize = [hwnd] {
+        RECT client{};
+        EXPECT_TRUE(GetClientRect(hwnd, &client));
+        return QSize(client.right, client.bottom);
+    };
+    const QSize initialClient = clientSize();
+    EXPECT_TRUE(QTest::qWaitFor([&] { return !hasCaption(); }, 2000));
+
+    // Maximize/restore transitions need WS_CAPTION, but the caption must not
+    // become part of the visible custom frame or change the client rectangle.
+    // zh_CN: 最大化/还原过渡需要 WS_CAPTION，但它不能进入可见的自绘边框，也不能改变客户区。
+    window.toggleMaximizeRestore();
+    EXPECT_TRUE(hasCaption());
+    // Maximize/restore must keep DWM's non-client rendering enabled so the
+    // window shadow is present throughout the resize.
+    // zh_CN: 最大化/还原必须保持 DWM 非客户区渲染开启，使缩放期间阴影始终存在。
+    EXPECT_NE(nativeNonClientRenderingPolicy(hwnd), kDwmNcrpDisabled);
+    EXPECT_TRUE(QTest::qWaitFor([&] { return window.isMaximized(); }, 2000));
+    EXPECT_TRUE(QTest::qWaitFor([&] { return !hasCaption(); }, 2000));
+
+    window.toggleMaximizeRestore();
+    EXPECT_TRUE(hasCaption());
+    EXPECT_NE(nativeNonClientRenderingPolicy(hwnd), kDwmNcrpDisabled);
+    EXPECT_TRUE(QTest::qWaitFor([&] { return !window.isMaximized(); }, 2000));
+    EXPECT_TRUE(QTest::qWaitFor([&] { return !hasCaption(); }, 2000));
+    EXPECT_EQ(clientSize(), initialClient);
+
+    // A minimized window keeps the temporary caption so restoring it can
+    // animate too; the settle pass removes it after the restore.
+    // zh_CN: 最小化窗口保留临时 caption，使还原也能播放动画；还原后的 settle 阶段再移除。
+    window.minimizeWindow();
+    EXPECT_TRUE(QTest::qWaitFor([&] { return window.isMinimized(); }, 2000));
+    EXPECT_TRUE(QTest::qWaitFor([&] { return hasCaption(); }, 2000));
+    window.showNormal();
+    EXPECT_TRUE(QTest::qWaitFor([&] { return !window.isMinimized(); }, 2000));
+    EXPECT_TRUE(QTest::qWaitFor([&] { return !hasCaption(); }, 2000));
+    EXPECT_EQ(clientSize(), initialClient);
+    window.close();
+}
+
+TEST(WindowsWindowTransitionTest, HideCarriesCaptionForFadeAndReleasesItAfterward)
+{
+    if (QGuiApplication::platformName() != QLatin1String("windows"))
+        GTEST_SKIP() << "Native window transitions require the Windows desktop platform";
+
+    HideTransitionProbeWindow window;
+    window.resize(720, 520);
+    window.setCustomWindowChromeEnabled(true);
+    window.show();
+    ASSERT_TRUE(QTest::qWaitForWindowExposed(&window, 2000));
+
+    const HWND hwnd = reinterpret_cast<HWND>(window.winId());
+    const auto hasCaption = [hwnd] { return (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == WS_CAPTION; };
+    EXPECT_FALSE(hasCaption());
+
+    window.hide();
+    ASSERT_TRUE(QTest::qWaitFor([&] { return !window.isVisible(); }, 2000));
+    EXPECT_TRUE(window.hideChangeObserved);
+    // The caption is present as the hide is submitted so Windows can fade the
+    // window, then removed so the next show keeps the caption-less frame.
+    // zh_CN: 提交隐藏时 caption 仍存在，供 Windows 淡出；隐藏完成后移除，保证下次显示仍是无 caption 框架。
+    EXPECT_TRUE(window.captionPresentAtHideStart);
+    EXPECT_TRUE(QTest::qWaitFor([&] { return !hasCaption(); }, 2000));
+}
+
+TEST(WindowsWindowTransitionTest, VisibleWindowHidesWhenApplicationIsAboutToQuit)
+{
+    if (QGuiApplication::platformName() != QLatin1String("windows"))
+        GTEST_SKIP() << "Native window transitions require the Windows desktop platform";
+
+    HideTransitionProbeWindow window;
+    window.resize(720, 520);
+    window.setCustomWindowChromeEnabled(true);
+    window.show();
+    ASSERT_TRUE(QTest::qWaitForWindowExposed(&window, 2000));
+    ASSERT_TRUE(window.isVisible());
+    EXPECT_FALSE(window.hideChangeObserved);
+
+    // Quitting destroys native windows without a close event. The window must
+    // still submit a hide while leaving the event loop so DWM can fade it.
+    // zh_CN: 退出会直接销毁原生窗口而不产生 close 事件；窗口仍须在离开事件循环时提交一次
+    // 隐藏，供 DWM 播放淡出。
+    ASSERT_TRUE(QMetaObject::invokeMethod(qApp, "aboutToQuit", Qt::DirectConnection));
+    EXPECT_FALSE(window.isVisible());
+    EXPECT_TRUE(window.hideChangeObserved);
+    EXPECT_TRUE(window.captionPresentAtHideStart);
+
+    const HWND hwnd = reinterpret_cast<HWND>(window.winId());
+    EXPECT_TRUE(QTest::qWaitFor([&] { return (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == 0; }, 2000));
+}
+
+TEST(WindowsWindowTransitionTest, AppearanceAfterPendingHideRestoresNonClientRenderingFirst)
+{
+    if (QGuiApplication::platformName() != QLatin1String("windows"))
+        GTEST_SKIP() << "Native window transitions require the Windows desktop platform";
+
+    HideTransitionProbeWindow window;
+    window.resize(720, 520);
+    window.setCustomWindowChromeEnabled(true);
+    window.show();
+    ASSERT_TRUE(QTest::qWaitForWindowExposed(&window, 2000));
+    ASSERT_TRUE(window.showChangeObserved);
+    const int showsBeforeHide = window.showSubmissionCount;
+
+    // Hide and show in the same event-loop turn, before the hide's settle pass
+    // runs. The appearance must not inherit the hide's disabled non-client
+    // rendering, or its whole animation would play without a shadow.
+    // zh_CN: 在同一轮事件循环内先隐藏再显示，此时隐藏的 settle 尚未执行。显示不能沿用
+    // 隐藏阶段关闭的非客户区渲染，否则整段出现动画都没有阴影。
+    window.hide();
+    window.show();
+
+    EXPECT_TRUE(window.isVisible());
+    EXPECT_GT(window.showSubmissionCount, showsBeforeHide);
+    EXPECT_TRUE(window.captionPresentAtShowStart);
+    EXPECT_TRUE(window.nonClientRenderingAtShowStart);
+}
+
+TEST(WindowsWindowTransitionTest, ShowCarriesCaptionForAppearanceAndReleasesItAfterward)
+{
+    if (QGuiApplication::platformName() != QLatin1String("windows"))
+        GTEST_SKIP() << "Native window transitions require the Windows desktop platform";
+
+    HideTransitionProbeWindow window;
+    window.resize(720, 520);
+    window.setCustomWindowChromeEnabled(true);
+    window.show();
+    const HWND showHwnd = reinterpret_cast<HWND>(window.winId());
+    EXPECT_NE(nativeNonClientRenderingEnabled(showHwnd), 0);
+    ASSERT_TRUE(QTest::qWaitForWindowExposed(&window, 2000));
+    RECT clientBefore = {};
+    ASSERT_TRUE(GetClientRect(showHwnd, &clientBefore));
+
+    EXPECT_TRUE(window.showChangeObserved);
+    EXPECT_TRUE(window.captionPresentAtShowStart);
+    EXPECT_TRUE(window.nonClientRenderingAtShowStart);
+    EXPECT_TRUE(QTest::qWaitFor(
+        [&] {
+            const HWND hwnd = reinterpret_cast<HWND>(window.winId());
+            return (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION) == 0;
+        },
+        2000));
+    const HWND hwnd = showHwnd;
+    EXPECT_EQ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION), 0);
+    // Preparing and releasing the caption around the appearance must not move
+    // or resize the client area.
+    // zh_CN: 出现前后补上和释放 caption 不能移动或缩放客户区。
+    RECT clientAfter = {};
+    ASSERT_TRUE(GetClientRect(hwnd, &clientAfter));
+    EXPECT_EQ(clientAfter.right - clientAfter.left, clientBefore.right - clientBefore.left);
+    EXPECT_EQ(clientAfter.bottom - clientAfter.top, clientBefore.bottom - clientBefore.top);
     window.close();
 }
 
