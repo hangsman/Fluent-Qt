@@ -19,6 +19,7 @@
 #include <QLockFile>
 #include <QMenu>
 #include <QMenuBar>
+#include <QPaintEvent>
 #include <QPainter>
 #include <QPixmap>
 #include <QPointer>
@@ -79,6 +80,7 @@
 #include "view/shell/AppIcon.h"
 #include "view/shell/GalleryApplicationController.h"
 #include "view/shell/GalleryContentPresenter.h"
+#include "view/shell/GalleryFrameRateLabel.h"
 #include "view/shell/GalleryIntroTour.h"
 #include "view/shell/GalleryNavigationMetrics.h"
 #include "view/shell/GalleryNavigationPane.h"
@@ -108,6 +110,7 @@ using fluent::gallery::GalleryApplicationController;
 using fluent::gallery::GalleryContentPage;
 using fluent::gallery::GalleryContentPresenter;
 using fluent::gallery::GalleryEntryGrid;
+using fluent::gallery::GalleryFrameRateLabel;
 using fluent::gallery::GalleryIntroTour;
 using fluent::gallery::GalleryNavigationPane;
 using fluent::gallery::GalleryNavigationViewModel;
@@ -135,7 +138,8 @@ public:
         : m_settings(settings), m_themeMode(settings.themeMode()), m_motionMode(settings.motionMode()),
           m_navigationStyle(settings.navigationStyle()), m_closeBehavior(settings.closeBehavior()),
           m_closeBehaviorConfirmed(settings.closeBehaviorConfirmed()),
-          m_homeParticlesEnabled(settings.homeParticlesEnabled()), m_introCompleted(settings.introCompleted())
+          m_homeParticlesEnabled(settings.homeParticlesEnabled()),
+          m_frameRateDisplayEnabled(settings.frameRateDisplayEnabled()), m_introCompleted(settings.introCompleted())
     {}
 
     ~GallerySettingsRestorer()
@@ -146,6 +150,7 @@ public:
         m_settings.setCloseBehavior(m_closeBehavior);
         m_settings.setCloseBehaviorConfirmed(m_closeBehaviorConfirmed);
         m_settings.setHomeParticlesEnabled(m_homeParticlesEnabled);
+        m_settings.setFrameRateDisplayEnabled(m_frameRateDisplayEnabled);
         m_settings.setIntroCompleted(m_introCompleted);
     }
 
@@ -157,6 +162,7 @@ private:
     GallerySettings::CloseBehavior m_closeBehavior;
     bool m_closeBehaviorConfirmed = false;
     bool m_homeParticlesEnabled = true;
+    bool m_frameRateDisplayEnabled = false;
     bool m_introCompleted = false;
 };
 
@@ -376,7 +382,9 @@ protected:
         m_motionMode = settings.motionMode();
         m_navigationStyle = settings.navigationStyle();
         m_spatialEnabled = settings.spatialModeEnabled();
+        m_frameRateDisplayEnabled = settings.frameRateDisplayEnabled();
         settings.setSpatialModeEnabled(false);
+        settings.setFrameRateDisplayEnabled(false);
         settings.setThemeMode(GallerySettings::ThemeMode::Light);
         settings.setMotionMode(GallerySettings::MotionMode::Full);
         settings.setNavigationStyle(GallerySettings::NavigationStyle::Auto);
@@ -390,6 +398,7 @@ protected:
         settings.setThemeMode(m_themeMode);
         settings.setMotionMode(m_motionMode);
         settings.setSpatialModeEnabled(m_spatialEnabled);
+        settings.setFrameRateDisplayEnabled(m_frameRateDisplayEnabled);
         fluent::FluentElement::setTheme(fluent::FluentElement::Light);
     }
 
@@ -398,6 +407,7 @@ private:
     GallerySettings::MotionMode m_motionMode = GallerySettings::MotionMode::Full;
     GallerySettings::NavigationStyle m_navigationStyle = GallerySettings::NavigationStyle::Auto;
     bool m_spatialEnabled = false;
+    bool m_frameRateDisplayEnabled = false;
 };
 
 TEST_F(GalleryShellFrameworkTest, WindowConstructsInitialHomeContentPage)
@@ -970,6 +980,95 @@ TEST_F(GalleryShellFrameworkTest, TitleBarContentUsesAnchorsAndCentersControls)
     ASSERT_FALSE(iconPixmap.isNull());
     const QSize logicalPixmapSize = fluentPixmapLogicalSize(iconPixmap);
     EXPECT_EQ(logicalPixmapSize, QSize(18, 18));
+}
+
+TEST_F(GalleryShellFrameworkTest, FrameRateDisplayIsOptionalAndKeepsTitleBarReadable)
+{
+    auto& settings = GallerySettings::instance();
+    GallerySettingsRestorer restore(settings);
+    settings.setFrameRateDisplayEnabled(false);
+    settings.setIntroCompleted(true);
+
+    GalleryWindow window;
+    window.resize(1180, 760);
+    ASSERT_TRUE(showInteractiveGallery(window));
+    ASSERT_TRUE(window.selectRoute(QStringLiteral("settings")));
+    ASSERT_TRUE(QTest::qWaitFor([&] { return window.currentSettingsPage() != nullptr; }, 2000));
+
+    auto* frameRate = vg::findRequiredChild<GalleryFrameRateLabel>(window.titleBar(),
+        QStringLiteral("GalleryTitleBar.FrameRate"));
+    auto* title = vg::findRequiredChild<QWidget>(window.titleBar(), QStringLiteral("GalleryTitleBar.Title"));
+    auto* appIcon = vg::findRequiredChild<QLabel>(window.titleBar(), QStringLiteral("GalleryTitleBar.AppIcon"));
+    auto* searchBox = vg::findRequiredChild<AutoSuggestBox>(window.titleBar(),
+        QStringLiteral("GalleryTitleBar.SearchBox"));
+    auto* toggle = vg::findRequiredChild<fluent::basicinput::ToggleSwitch>(window.currentSettingsPage(),
+        QStringLiteral("gallerySettingsFrameRateDisplayToggle"));
+    ASSERT_NE(frameRate, nullptr);
+    ASSERT_NE(title, nullptr);
+    ASSERT_NE(appIcon, nullptr);
+    ASSERT_NE(searchBox, nullptr);
+    ASSERT_NE(toggle, nullptr);
+
+    EXPECT_FALSE(frameRate->isVisible());
+    EXPECT_FALSE(toggle->isOn());
+    EXPECT_EQ(frameRate->accessibleName(), QStringLiteral("Frame rate"));
+    EXPECT_TRUE(frameRate->testAttribute(Qt::WA_TransparentForMouseEvents));
+    EXPECT_TRUE(vg::spacingXIs(appIcon, title, 8));
+
+    QSignalSpy changed(&settings, &GallerySettings::frameRateDisplayEnabledChanged);
+    toggle->setFocus(Qt::OtherFocusReason);
+    QTest::keyClick(toggle, Qt::Key_Space);
+    ASSERT_TRUE(QTest::qWaitFor([&] { return settings.frameRateDisplayEnabled(); }, 1000));
+    ASSERT_TRUE(QTest::qWaitFor([&] { return frameRate->isVisible(); }, 1000));
+    EXPECT_EQ(changed.count(), 1);
+    EXPECT_TRUE(toggle->isOn());
+    EXPECT_TRUE(vg::spacingXIs(appIcon, frameRate, 8));
+    EXPECT_TRUE(vg::spacingXIs(frameRate, title, 8));
+    EXPECT_TRUE(searchBox->isVisible());
+    EXPECT_FALSE(mappedGeometry(frameRate, window.titleBar()).intersects(mappedGeometry(searchBox, window.titleBar())));
+
+    auto* contentHost = window.contentHost();
+    ASSERT_NE(contentHost, nullptr);
+    for (int frame = 0; frame < 4; ++frame) {
+        QPaintEvent paintEvent(QRect(0, 0, 1, 1));
+        QApplication::sendEvent(contentHost, &paintEvent);
+        QApplication::processEvents();
+        QTest::qWait(20);
+    }
+    ASSERT_TRUE(QTest::qWaitFor([&] { return frameRate->currentFrameRate() > 0; }, 1500));
+    EXPECT_TRUE(frameRate->accessibleDescription().contains(QStringLiteral("frames per second")));
+
+    const QString snapshotDirectory = qEnvironmentVariable("FLUENTQT_FPS_SNAPSHOT_DIR");
+    if (!snapshotDirectory.isEmpty()) {
+        ASSERT_TRUE(QDir().mkpath(snapshotDirectory));
+        for (const auto theme : {GallerySettings::ThemeMode::Light, GallerySettings::ThemeMode::Dark}) {
+            settings.setThemeMode(theme);
+            QTest::qWait(240);
+            const QString mode = theme == GallerySettings::ThemeMode::Light ? "light" : "dark";
+            EXPECT_TRUE(window.grab().save(
+                snapshotDirectory + QStringLiteral("/fps-overlay-") + mode + QStringLiteral(".png")));
+        }
+        settings.setThemeMode(GallerySettings::ThemeMode::Light);
+    }
+
+    for (const int width : {640, 460}) {
+        window.resize(width, 700);
+        QTest::qWait(160);
+        EXPECT_TRUE(frameRate->isVisible()) << width;
+        EXPECT_LE(frameRate->geometry().right(),
+            window.titleBar()->width() - window.titleBar()->systemReservedTrailingWidth())
+            << width;
+        if (searchBox->isVisible()) {
+            EXPECT_FALSE(
+                mappedGeometry(frameRate, window.titleBar()).intersects(mappedGeometry(searchBox, window.titleBar())))
+                << width;
+        }
+    }
+
+    settings.setFrameRateDisplayEnabled(false);
+    ASSERT_TRUE(QTest::qWaitFor([&] { return !frameRate->isVisible(); }, 1000));
+    EXPECT_FALSE(toggle->isOn());
+    EXPECT_TRUE(vg::spacingXIs(appIcon, title, 8));
 }
 
 TEST_F(GalleryShellFrameworkTest, ApplicationIconRetainsResolutionForRetinaDockSizes)
@@ -2656,9 +2755,9 @@ TEST_F(GalleryShellFrameworkTest, SettingsChoicesApplyAndDeferredRowsAreOmitted)
             EXPECT_EQ(metrics.elidedText(item, Qt::ElideRight, availableTextWidth), item);
         }
     }
-    // Appearance & behavior (7 rows) + App behavior (1 row) + Updates (1 row) = 9 rows.
+    // Appearance & behavior (8 rows) + App behavior (1 row) + Updates (1 row) = 10 rows.
     EXPECT_NE(page->findChild<QWidget*>(QStringLiteral("gallerySettingsAccentControl")), nullptr);
-    EXPECT_EQ(page->findChildren<QFrame*>(QStringLiteral("gallerySettingsRow")).size(), 9);
+    EXPECT_EQ(page->findChildren<QFrame*>(QStringLiteral("gallerySettingsRow")).size(), 10);
 
     QStringList visibleText;
     for (auto* label : page->findChildren<fluent::textfields::Label*>())
@@ -2669,7 +2768,7 @@ TEST_F(GalleryShellFrameworkTest, SettingsChoicesApplyAndDeferredRowsAreOmitted)
     EXPECT_FALSE(visibleText.contains(QStringLiteral("Fluent-Qt Gallery")));
 
     const auto iconViews = page->findChildren<fluent::FontIcon*>(QStringLiteral("gallerySettingsRowIcon"));
-    ASSERT_EQ(iconViews.size(), 9);
+    ASSERT_EQ(iconViews.size(), 10);
     for (auto* iconView : iconViews) {
         EXPECT_FALSE(iconView->glyph().isEmpty());
         EXPECT_EQ(iconView->iconSize(), Typography::IconSize::Standard);

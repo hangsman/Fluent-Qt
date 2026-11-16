@@ -244,6 +244,16 @@ SettingsPage::SettingsPage(const GalleryNavigationItem& item, QWidget* parent) :
         &GallerySettings::setHomeParticlesEnabled);
     connect(settings, &GallerySettings::homeParticlesEnabledChanged, homeParticles,
         &fluent::basicinput::ToggleSwitch::setIsOn);
+    auto* frameRateDisplay = new fluent::basicinput::ToggleSwitch(this);
+    frameRateDisplay->setObjectName(QStringLiteral("gallerySettingsFrameRateDisplayToggle"));
+    frameRateDisplay->setAccessibleName(QStringLiteral("Frame rate display"));
+    frameRateDisplay->setAccessibleDescription(QStringLiteral("Show the current painting frame rate in the title bar"));
+    frameRateDisplay->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    frameRateDisplay->setIsOn(settings->frameRateDisplayEnabled());
+    connect(frameRateDisplay, &fluent::basicinput::ToggleSwitch::toggled, settings,
+        &GallerySettings::setFrameRateDisplayEnabled);
+    connect(settings, &GallerySettings::frameRateDisplayEnabledChanged, frameRateDisplay,
+        &fluent::basicinput::ToggleSwitch::setIsOn);
     auto* spatialMode = new fluent::basicinput::ToggleSwitch(this);
     spatialMode->setObjectName(QStringLiteral("gallerySettingsSpatialModeToggle"));
     spatialMode->setAccessibleName(QStringLiteral("3D Gallery"));
@@ -359,6 +369,8 @@ SettingsPage::SettingsPage(const GalleryNavigationItem& item, QWidget* parent) :
         QStringLiteral("Choose the accent used by the Fluent interface"), m_accentControl));
     m_contentLayout->addWidget(createSettingsRow(Typography::Icons::Play, QStringLiteral("Motion"),
         QStringLiteral("Choose full, reduced, or disabled interface motion"), m_motionChoice));
+    m_contentLayout->addWidget(createSettingsRow(Typography::Icons::View, QStringLiteral("Frame rate display"),
+        QStringLiteral("Show the current painting frame rate in the title bar"), frameRateDisplay));
     m_contentLayout->addWidget(createSettingsRow(Typography::Icons::Grid, QStringLiteral("3D Gallery"),
         QStringLiteral("Add depth to navigation, pages and all Spatial examples."), spatialControl));
     m_contentLayout->addWidget(createSettingsRow(Typography::Icons::FavoriteStar,

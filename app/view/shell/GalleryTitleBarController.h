@@ -28,6 +28,7 @@ class ToolTip;
 
 namespace fluent::gallery {
 
+class GalleryFrameRateLabel;
 class GallerySearchService;
 
 /**
@@ -79,6 +80,13 @@ public:
     /// zh_CN: 仅在存在侧边窗格时显示导航菜单按钮。
     void setMenuEnabled(bool enabled);
 
+    /// Shows or hides the optional content painting-rate badge.
+    /// zh_CN: 显示或隐藏可选的内容区绘制帧率徽标。
+    void setFrameRateDisplayEnabled(bool enabled);
+    /// Restricts frame-rate sampling to the Gallery content subtree.
+    /// zh_CN: 将帧率采样范围限定为 Gallery 内容子树。
+    void setFrameRateMonitor(QWidget* contentRoot);
+
     /// Search box widget the first-launch intro tour anchors a coach mark to.
     /// zh_CN: 首次启动引导用来锚定提示的搜索框控件。
     QWidget* searchBox() const;
@@ -112,6 +120,7 @@ private:
     QPointer<QObject> m_backButton;
     QPointer<QObject> m_menuButton;
     QPointer<QLabel> m_appIcon;
+    QPointer<GalleryFrameRateLabel> m_frameRate;
     QPointer<fluent::textfields::Label> m_title;
     QPointer<fluent::textfields::AutoSuggestBox> m_searchBox;
     QPointer<GallerySearchService> m_search;
@@ -129,6 +138,7 @@ private:
     bool m_chromeVisible = true;
     bool m_menuAvailable = false;
     bool m_appIconRevealed = true;
+    bool m_frameRateDisplayEnabled = false;
 };
 
 } // namespace fluent::gallery

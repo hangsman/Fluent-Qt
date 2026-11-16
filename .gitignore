@@ -1,6 +1,9 @@
 # Vs workspace files
 *.vs
 
+# Idea files
+.idea
+
 # binary files
 build/
 

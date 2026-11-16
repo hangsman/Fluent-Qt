@@ -74,6 +74,11 @@ public:
     bool homeParticlesEnabled() const { return m_homeParticlesEnabled; }
     void setHomeParticlesEnabled(bool enabled);
 
+    // Diagnostic title-bar readout of the Gallery content painting rate.
+    // zh_CN: 标题栏中的 Gallery 内容区绘制帧率诊断显示。
+    bool frameRateDisplayEnabled() const { return m_frameRateDisplayEnabled; }
+    void setFrameRateDisplayEnabled(bool enabled);
+
     // Browser-style whole-interface zoom, snapped to interfacezoom::Levels.
     // zh_CN: 浏览器式整体界面缩放百分比，取值对齐 interfacezoom::Levels。
     int interfaceZoomPercent() const { return m_interfaceZoomPercent; }
@@ -104,6 +109,7 @@ signals:
     void windowEffectChanged(fluent::windowing::BackdropEffect effect);
     void closeBehaviorChanged(CloseBehavior behavior);
     void homeParticlesEnabledChanged(bool enabled);
+    void frameRateDisplayEnabledChanged(bool enabled);
     void interfaceZoomPercentChanged(int percent);
     void spatialModeEnabledChanged(bool enabled);
     void spatialAvailabilityChanged();
@@ -129,6 +135,7 @@ private:
     bool m_introCompleted = false;
     QString m_lastHomeParticleEffect;
     bool m_homeParticlesEnabled = true;
+    bool m_frameRateDisplayEnabled = false;
     int m_interfaceZoomPercent = interfacezoom::DefaultPercent;
     int m_windowGeometryZoomPercent = interfacezoom::DefaultPercent;
     bool m_spatialModeEnabled = false;

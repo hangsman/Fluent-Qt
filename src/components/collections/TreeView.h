@@ -13,6 +13,7 @@
 #include "components/collections/SelectionMode.h"
 
 class QLabel;
+class QPainter;
 class QPaintEvent;
 class QResizeEvent;
 class QShowEvent;
@@ -364,6 +365,13 @@ private:
     void startExpandReveal(const QModelIndex& parent);
     void startCollapseReveal(const QModelIndex& parent);
     void finalizeDeferredCollapse();
+    // QTreeView only visits rows whose unshifted layout rect intersects its paint region. During a
+    // reveal, rows after the subtree are translated and can enter the viewport even though their
+    // layout rect is already outside it. Extend the native drawTree() region for those rows so Qt
+    // updates its per-row indentation state before drawRow(). zh_CN: QTreeView 只遍历未平移几何仍与
+    // 绘制区域相交的行；展开/收起时，子树后的行会平移进入可视区。这里扩展原生 drawTree() 的区域
+    // 补绘这些行，让 Qt 在 drawRow() 前更新逐行缩进状态，避免空白和横向跳动。
+    void paintRowsBelowExpandReveal(QPainter* painter);
 
     // Drag helpers — file-manager style
     void computeDropTarget(const QPoint& pos);
@@ -424,6 +432,7 @@ private:
     bool m_animExpanding = true;            // true=expand, false=collapse
     qreal m_animSubtreeHeight = 0.0;        // pixel height of the animating subtree
     bool m_pendingCollapseFinalize = false; // deferred collapse: actually collapse on finish
+    bool m_paintingExpandRevealTail = false;
 
 public:
     /** Query chevron rotation progress for delegate painting. 0=right, 1=down. */

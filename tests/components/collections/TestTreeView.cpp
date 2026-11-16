@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QColor>
 #include <QCoreApplication>
+#include <QHash>
 #include <QImage>
 #include <QItemSelectionModel>
 #include <QMetaType>
@@ -11,6 +12,8 @@
 #include <QScrollBar>
 #include <QStandardItemModel>
 #include <QStyleOptionViewItem>
+#include <QStringList>
+#include <QVariantAnimation>
 #include <QtTest/QSignalSpy>
 #include <QtTest/QTest>
 #include <gtest/gtest.h>
@@ -52,6 +55,34 @@ protected:
         }
         TreeView::paintEvent(event);
     }
+};
+
+class PaintRecordingDelegate final : public treeview_test::FluentTreeItemDelegate {
+public:
+    explicit PaintRecordingDelegate(TreeView* view)
+        : FluentTreeItemDelegate(static_cast<fluent::FluentElement*>(view),
+              Spacing::ControlHeight::Standard + Spacing::Gap::Tight,
+              view,
+              view)
+    {}
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        const QString text = index.data(Qt::DisplayRole).toString();
+        paintedTextX.insert(text, option.rect.x());
+        if (!paintedTexts.contains(text))
+            paintedTexts.append(text);
+        FluentTreeItemDelegate::paint(painter, option, index);
+    }
+
+    void resetPaintedTexts()
+    {
+        paintedTexts.clear();
+        paintedTextX.clear();
+    }
+
+    mutable QStringList paintedTexts;
+    mutable QHash<QString, int> paintedTextX;
 };
 
 int defaultTreeRowHeight()
@@ -869,6 +900,114 @@ TEST_F(TreeViewTest, AnimatedCollapseHitTestingFollowsVisualRows)
     QTest::mouseClick(tv->viewport(), Qt::LeftButton, Qt::NoModifier, visualPersonalCenter);
     processEvents();
     EXPECT_EQ(tv->selectedItem(), personal);
+}
+
+TEST_F(TreeViewTest, RevealPaintsFollowingRowsOutsideTheUnshiftedViewport)
+{
+    TreeView* tv = new TreeView(window);
+    auto* model = new QStandardItemModel(tv);
+    auto* parent = new QStandardItem(QStringLiteral("Parent"));
+    for (int row = 0; row < 8; ++row)
+        parent->appendRow(new QStandardItem(QStringLiteral("Child %1").arg(row)));
+    model->appendRow(parent);
+    auto* following = new QStandardItem(QStringLiteral("Following item"));
+    model->appendRow(following);
+    tv->setModel(model);
+    auto* delegate = new PaintRecordingDelegate(tv);
+    tv->setItemDelegate(delegate);
+    tv->setFixedSize(300, 240);
+    showOffscreen(window);
+
+    const QModelIndex parentIndex = parent->index();
+    const QModelIndex followingIndex = following->index();
+    auto* reveal = tv->findChild<QVariantAnimation*>(QStringLiteral("fluentTreeViewExpandRevealAnimation"));
+    ASSERT_NE(reveal, nullptr);
+
+    for (bool expanding : {true, false}) {
+        if (!expanding) {
+            tv->expandAll();
+            processEvents();
+            ASSERT_TRUE(tv->isExpanded(parentIndex));
+        }
+
+        tv->toggleExpanded(parentIndex);
+        ASSERT_EQ(reveal->state(), QAbstractAnimation::Running);
+        // Keep the reveal halfway through: the following row is already outside its unshifted
+        // layout position but its translated visual position is inside the viewport.
+        // zh_CN: 停在动画中点：后方行未平移时的布局位置已在 viewport 外，但平移后的视觉位置仍应可见。
+        reveal->setCurrentTime(reveal->duration() / 2);
+        ASSERT_TRUE(tv->visualRect(followingIndex).isEmpty());
+
+        delegate->resetPaintedTexts();
+        tv->viewport()->grab();
+        EXPECT_TRUE(delegate->paintedTexts.contains(QStringLiteral("Following item"))) << "expanding=" << expanding;
+
+        ASSERT_TRUE(QTest::qWaitFor(
+            [&] { return reveal->state() != QAbstractAnimation::Running && tv->isExpanded(parentIndex) == expanding; },
+            1000));
+        processEvents();
+    }
+}
+
+TEST_F(TreeViewTest, RevealKeepsFollowingRowsAtTheirHierarchyIndentation)
+{
+    TreeView* tv = new TreeView(window);
+    auto* model = new QStandardItemModel(tv);
+    auto* parent = new QStandardItem(QStringLiteral("Parent"));
+    for (int row = 0; row < 8; ++row)
+        parent->appendRow(new QStandardItem(QStringLiteral("Child %1").arg(row)));
+    model->appendRow(parent);
+    auto* following = new QStandardItem(QStringLiteral("Following parent"));
+    following->appendRow(new QStandardItem(QStringLiteral("Following child")));
+    model->appendRow(following);
+    tv->setModel(model);
+    auto* delegate = new PaintRecordingDelegate(tv);
+    tv->setItemDelegate(delegate);
+    // End the base paint after the following root while leaving its child outside the unshifted viewport.
+    // zh_CN: 让基础绘制停在后方父项处，使其子项仅通过动画补绘进入 viewport。
+    tv->setFixedSize(300, defaultTreeRowHeight() * 9 + defaultTreeRowHeight() / 2);
+    showOffscreen(window);
+
+    const QModelIndex parentIndex = parent->index();
+    const QModelIndex followingIndex = following->index();
+    const QModelIndex followingChildIndex = following->child(0)->index();
+    auto* reveal = tv->findChild<QVariantAnimation*>(QStringLiteral("fluentTreeViewExpandRevealAnimation"));
+    ASSERT_NE(reveal, nullptr);
+
+    tv->expand(followingIndex);
+    ASSERT_TRUE(QTest::qWaitFor(
+        [&] { return reveal->state() != QAbstractAnimation::Running && tv->isExpanded(followingIndex); }, 1000));
+
+    for (bool expanding : {true, false}) {
+        if (!expanding && !tv->isExpanded(parentIndex)) {
+            tv->toggleExpanded(parentIndex);
+            ASSERT_TRUE(QTest::qWaitFor(
+                [&] { return reveal->state() != QAbstractAnimation::Running && tv->isExpanded(parentIndex); }, 1000));
+        }
+
+        tv->toggleExpanded(parentIndex);
+        ASSERT_EQ(reveal->state(), QAbstractAnimation::Running);
+        reveal->setCurrentTime(reveal->duration() / 2);
+        ASSERT_TRUE(tv->visualRect(followingChildIndex).isEmpty());
+
+        delegate->resetPaintedTexts();
+        tv->viewport()->grab();
+
+        const auto& paintedX = delegate->paintedTextX;
+        ASSERT_TRUE(paintedX.contains(QStringLiteral("Parent")));
+        ASSERT_TRUE(paintedX.contains(QStringLiteral("Child 0")));
+        ASSERT_TRUE(paintedX.contains(QStringLiteral("Following parent")));
+        ASSERT_TRUE(paintedX.contains(QStringLiteral("Following child")));
+        EXPECT_EQ(paintedX.value(QStringLiteral("Following parent")), paintedX.value(QStringLiteral("Parent")))
+            << "expanding=" << expanding;
+        EXPECT_EQ(paintedX.value(QStringLiteral("Following child")), paintedX.value(QStringLiteral("Child 0")))
+            << "expanding=" << expanding;
+
+        ASSERT_TRUE(QTest::qWaitFor(
+            [&] { return reveal->state() != QAbstractAnimation::Running && tv->isExpanded(parentIndex) == expanding; },
+            1000));
+        processEvents();
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

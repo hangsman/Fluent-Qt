@@ -29,6 +29,7 @@ constexpr char kWindowMaximizedKey[] = "window/maximized";
 constexpr char kIntroCompletedKey[] = "intro/completed";
 constexpr char kLastHomeParticleEffectKey[] = "home/lastParticleEffect";
 constexpr char kHomeParticlesEnabledKey[] = "home/particlesEnabled";
+constexpr char kFrameRateDisplayEnabledKey[] = "settings/frameRateDisplayEnabled";
 constexpr char kInterfaceZoomPercentKey[] = "settings/interfaceZoomPercent";
 constexpr char kWindowGeometryZoomPercentKey[] = "window/zoomPercent";
 constexpr char kSpatialModeEnabledKey[] = "settings/spatialModeEnabled";
@@ -177,6 +178,19 @@ void GallerySettings::setHomeParticlesEnabled(bool enabled)
         settings.sync();
     }
     emit homeParticlesEnabledChanged(enabled);
+}
+
+void GallerySettings::setFrameRateDisplayEnabled(bool enabled)
+{
+    if (m_frameRateDisplayEnabled == enabled)
+        return;
+    m_frameRateDisplayEnabled = enabled;
+    if (platform::persistenceAvailable()) {
+        auto settings = platform::createSettings();
+        settings.setValue(QString::fromLatin1(kFrameRateDisplayEnabledKey), enabled);
+        settings.sync();
+    }
+    emit frameRateDisplayEnabledChanged(enabled);
 }
 
 void GallerySettings::setInterfaceZoomPercent(int percent)
@@ -436,6 +450,7 @@ void GallerySettings::load()
     m_introCompleted = settings.value(QString::fromLatin1(kIntroCompletedKey), false).toBool();
     m_lastHomeParticleEffect = settings.value(QString::fromLatin1(kLastHomeParticleEffectKey)).toString();
     m_homeParticlesEnabled = settings.value(QString::fromLatin1(kHomeParticlesEnabledKey), true).toBool();
+    m_frameRateDisplayEnabled = settings.value(QString::fromLatin1(kFrameRateDisplayEnabledKey), false).toBool();
     m_interfaceZoomPercent = interfacezoom::nearestLevel(
         settings.value(QString::fromLatin1(kInterfaceZoomPercentKey), interfacezoom::DefaultPercent).toInt());
     // Placement always writes this key with the geometry; without it the

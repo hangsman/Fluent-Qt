@@ -50,6 +50,8 @@ struct TitleBar {
     static constexpr int ButtonSize = 24;
     static constexpr int ButtonIconSize = Typography::IconSize::Standard;
     static constexpr int AppIconSize = 18;
+    static constexpr int FrameRateWidth = 64;
+    static constexpr int FrameRateHeight = 22;
     static constexpr int TitleWidth = 144;
     static constexpr int TitleHeight = 24;
     static constexpr int SearchMaxWidth = 360;
@@ -67,13 +69,17 @@ struct TitleBar {
         bool showAppIcon,
         bool showTitle,
         qreal backReveal,
-        bool showMenu = true)
+        bool showMenu = true,
+        bool showFrameRate = false)
     {
         int right = leadingOffset(systemReservedLeadingWidth) + qRound(backReveal * (ButtonSize + ItemGap));
         if (showMenu)
             right += ButtonSize;
-        if (showAppIcon)
+        if (showAppIcon) {
             right += (showMenu ? ItemGap : 0) + AppIconSize;
+            if (showFrameRate)
+                right += ItemGap + FrameRateWidth;
+        }
         if (showTitle)
             right += ItemGap + TitleWidth;
         return right;
@@ -83,9 +89,12 @@ struct TitleBar {
         bool showAppIcon,
         bool showTitle,
         qreal backReveal,
-        bool showMenu = true)
+        bool showMenu = true,
+        bool showFrameRate = false)
     {
-        return leadingChromeRight(systemReservedLeadingWidth, showAppIcon, showTitle, backReveal, showMenu) + ItemGap;
+        return leadingChromeRight(systemReservedLeadingWidth, showAppIcon, showTitle, backReveal, showMenu,
+                   showFrameRate)
+            + ItemGap;
     }
 
     static int searchRightBound(int barWidth, int systemReservedTrailingWidth)

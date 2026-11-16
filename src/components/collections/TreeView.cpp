@@ -12,6 +12,7 @@
 #include <QPainterPath>
 #include <QPointer>
 #include <QProxyStyle>
+#include <QRegion>
 #include <QResizeEvent>
 #include <QScopeGuard>
 #include <QScrollBar>
@@ -221,6 +222,7 @@ TreeView::TreeView(QWidget* parent) : QTreeView(parent)
     // animates closed, then the real collapse happens on finish.
     // zh_CN: 单个可逆动画驱动子树高度展开；收起为延迟收起，先动画再真正折叠。
     m_expandRevealAnim = new QVariantAnimation(this);
+    m_expandRevealAnim->setObjectName(QStringLiteral("fluentTreeViewExpandRevealAnimation"));
     m_expandRevealAnim->setDuration(kExpandRevealDuration);
     m_expandRevealAnim->setEasingCurve(themeAnimation().standard);
     connect(m_expandRevealAnim, &QVariantAnimation::valueChanged, this, [this](const QVariant&) {
@@ -714,6 +716,10 @@ void TreeView::paintEvent(QPaintEvent* event)
 
     // --- 3. Tree items (QTreeView default) ---
     QTreeView::paintEvent(event);
+    if (m_animParent.isValid() && m_expandRevealAnim && m_expandRevealAnim->state() == QAbstractAnimation::Running) {
+        QPainter painter(viewport());
+        paintRowsBelowExpandReveal(&painter);
+    }
 
     // --- 3.5 Drop indicator: OnItem highlight ---
     if (m_isDragging && m_dropMode == DropMode::OnItem && m_dropOnIndex.isValid()) {
@@ -925,6 +931,18 @@ void TreeView::drawRow(QPainter* painter, const QStyleOptionViewItem& options, c
         const qreal progress = qBound(0.0, m_expandRevealAnim->currentValue().toReal(), 1.0);
         const qreal boundaryY = parentRect.bottom() + 1 + m_animSubtreeHeight * progress;
         const qreal slideUp = m_animSubtreeHeight * (1.0 - progress);
+        const bool tailRow = index != parent && !isDescendantOf(index, parent)
+            && options.rect.top() >= parentRect.bottom();
+
+        if (m_paintingExpandRevealTail) {
+            if (!tailRow)
+                return;
+            painter->save();
+            painter->translate(0, -slideUp);
+            QTreeView::drawRow(painter, options, index);
+            painter->restore();
+            return;
+        }
 
         if (index != parent && isDescendantOf(index, parent)) {
             // Reveal window: only the portion above the growing boundary is shown.
@@ -938,12 +956,10 @@ void TreeView::drawRow(QPainter* painter, const QStyleOptionViewItem& options, c
             painter->restore();
             return;
         }
-        if (index != parent && options.rect.top() >= parentRect.bottom()) {
-            // Rows below the subtree slide with the reveal edge.
-            painter->save();
-            painter->translate(0, -slideUp);
-            QTreeView::drawRow(painter, options, index);
-            painter->restore();
+        if (tailRow) {
+            // PaintRowsBelowExpandReveal() repaints translated rows through the native drawTree()
+            // traversal, which keeps QTreeView's private current-row indentation in sync.
+            // zh_CN: 后方行由补绘阶段走原生 drawTree() 绘制，使 QTreeView 的当前行缩进保持同步。
             return;
         }
     }
@@ -957,6 +973,36 @@ void TreeView::drawRow(QPainter* painter, const QStyleOptionViewItem& options, c
         return;
     }
     QTreeView::drawRow(painter, options, index);
+}
+
+void TreeView::paintRowsBelowExpandReveal(QPainter* painter)
+{
+    if (!painter || !viewport() || !m_animParent.isValid() || !m_expandRevealAnim || !model()
+        || m_paintingExpandRevealTail)
+        return;
+
+    const QModelIndex parent = QModelIndex(m_animParent);
+    const QRect parentRect = QTreeView::visualRect(parent);
+    if (parentRect.isEmpty())
+        return;
+
+    const qreal progress = qBound(0.0, m_expandRevealAnim->currentValue().toReal(), 1.0);
+    const qreal slideUp = m_animSubtreeHeight * (1.0 - progress);
+    const QRect viewportRect = viewport()->rect();
+    const int regionTop = qMax(parentRect.bottom() + 1,
+        qFloor(parentRect.bottom() + 1.0 + m_animSubtreeHeight * progress));
+    const int regionBottom = viewportRect.bottom() + qCeil(slideUp);
+    if (regionTop > regionBottom || viewportRect.width() <= 0)
+        return;
+
+    // drawTree() walks the model rows and updates QTreeView's private current row before each
+    // drawRow(). Calling drawRow() directly for the tail would reuse one stale indentation for
+    // every following row and make nested items jump horizontally during the animation.
+    // zh_CN: drawTree() 逐行更新 QTreeView 私有当前行后再调用 drawRow()。若直接逐行调用 drawRow()，
+    // 后方不同层级的行会共用一份过期缩进，动画期间便横向跳动。
+    m_paintingExpandRevealTail = true;
+    const auto resetTailPaint = qScopeGuard([this]() { m_paintingExpandRevealTail = false; });
+    QTreeView::drawTree(painter, QRegion(0, regionTop, viewportRect.width(), regionBottom - regionTop + 1));
 }
 
 qreal TreeView::chevronRotation(const QModelIndex& index) const

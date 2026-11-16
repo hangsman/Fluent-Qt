@@ -22,6 +22,7 @@
 #include "design/Animation.h"
 #include "design/Typography.h"
 #include "AppIcon.h"
+#include "GalleryFrameRateLabel.h"
 #include "GallerySearchService.h"
 #include "GalleryWindowMetrics.h"
 #include "view/support/GalleryMotion.h"
@@ -184,6 +185,10 @@ void GalleryTitleBarController::build()
     appIcon->setFixedSize(TitleBarMetrics::AppIconSize, TitleBarMetrics::AppIconSize);
     refreshAppIcon();
 
+    auto* frameRate = new GalleryFrameRateLabel(bar);
+    m_frameRate = frameRate;
+    frameRate->setFixedSize(TitleBarMetrics::FrameRateWidth, TitleBarMetrics::FrameRateHeight);
+
     auto* title = new fluent::textfields::Label(QStringLiteral("Fluent-Qt Gallery"), bar);
     m_title = title;
     title->setObjectName(QStringLiteral("GalleryTitleBar.Title"));
@@ -212,6 +217,11 @@ void GalleryTitleBarController::build()
     appIconAnchors.left = {menuButton, Edge::Right, TitleBarMetrics::ItemGap};
     appIconAnchors.verticalCenter = {bar, Edge::VCenter, 0};
     layout->addAnchoredWidget(appIcon, appIconAnchors);
+
+    fluent::AnchorLayout::Anchors frameRateAnchors;
+    frameRateAnchors.left = {appIcon, Edge::Right, TitleBarMetrics::ItemGap};
+    frameRateAnchors.verticalCenter = {bar, Edge::VCenter, 0};
+    layout->addAnchoredWidget(frameRate, frameRateAnchors);
 
     fluent::AnchorLayout::Anchors titleAnchors;
     titleAnchors.left = {appIcon, Edge::Right, TitleBarMetrics::ItemGap};
@@ -408,12 +418,15 @@ void GalleryTitleBarController::updateLayout()
     // they show. Nothing shows while the splash owns the title bar. zh_CN: 最小布局下标题+图标让位给搜索框。
     const bool showAppIcon = m_chromeVisible;
     const bool showTitle = m_chromeVisible && !minimalNav;
+    const bool showFrameRate = m_chromeVisible && m_frameRateDisplayEnabled;
     if (auto* menu = menuButton())
         menu->setVisible(m_chromeVisible && m_menuAvailable);
     if (m_title)
         m_title->setVisible(showTitle);
     if (m_appIcon)
         m_appIcon->setVisible(showAppIcon);
+    if (m_frameRate)
+        m_frameRate->setVisible(showFrameRate);
 
     // Settle the left-anchored chain (back/menu/icon/title) before publishing hit-test rects.
     // zh_CN: 发布命中测试区域前，先让左锚链落到最终几何。
@@ -421,7 +434,7 @@ void GalleryTitleBarController::updateLayout()
         barLayout->activate();
 
     const int leftBound = TitleBarMetrics::searchLeftBound(bar->systemReservedLeadingWidth(), showAppIcon, showTitle,
-        m_backReveal, m_menuAvailable);
+        m_backReveal, m_menuAvailable, showFrameRate);
     const int rightBound = TitleBarMetrics::searchRightBound(bar->width(), bar->systemReservedTrailingWidth());
     const int avail = TitleBarMetrics::searchAvailableWidth(leftBound, rightBound);
 
@@ -509,6 +522,34 @@ void GalleryTitleBarController::setMenuEnabled(bool enabled)
         layout->addAnchoredWidget(m_appIcon, anchors);
     }
     updateLayout();
+}
+
+void GalleryTitleBarController::setFrameRateDisplayEnabled(bool enabled)
+{
+    if (m_frameRateDisplayEnabled == enabled)
+        return;
+    m_frameRateDisplayEnabled = enabled;
+    if (m_frameRate)
+        m_frameRate->setDisplayEnabled(enabled);
+
+    auto* bar = titleBar();
+    auto* title = m_title.data();
+    if (auto* layout = bar && title ? qobject_cast<fluent::AnchorLayout*>(bar->layout()) : nullptr) {
+        QWidget* previous = enabled && m_frameRate
+            ? static_cast<QWidget*>(m_frameRate.data())
+            : static_cast<QWidget*>(m_appIcon.data());
+        fluent::AnchorLayout::Anchors anchors;
+        anchors.left = {previous, Edge::Right, TitleBarMetrics::ItemGap};
+        anchors.verticalCenter = {bar, Edge::VCenter, 0};
+        layout->addAnchoredWidget(title, anchors);
+    }
+    updateLayout();
+}
+
+void GalleryTitleBarController::setFrameRateMonitor(QWidget* contentRoot)
+{
+    if (m_frameRate)
+        m_frameRate->setMonitoredRoot(contentRoot);
 }
 
 QWidget* GalleryTitleBarController::searchBox() const

@@ -524,8 +524,16 @@ void GalleryWindow::buildNavigationShell()
     setNavigationPanesCompact(false);
     setContentWidget(m_navigationView);
     auto& settings = GallerySettings::instance();
+    if (m_titleBar) {
+        m_titleBar->setFrameRateMonitor(contentHost());
+        m_titleBar->setFrameRateDisplayEnabled(settings.frameRateDisplayEnabled());
+    }
     connect(&settings, &GallerySettings::navigationStyleChanged, this, &GalleryWindow::applyNavigationStyle);
     connect(&settings, &GallerySettings::windowEffectChanged, this, &GalleryWindow::setBackdropEffect);
+    connect(&settings, &GallerySettings::frameRateDisplayEnabledChanged, this, [this](bool enabled) {
+        if (m_titleBar)
+            m_titleBar->setFrameRateDisplayEnabled(enabled);
+    });
     applyNavigationStyle(settings.navigationStyle());
     updateNavigationCommands();
     LOG_DEBUG(QStringLiteral(
