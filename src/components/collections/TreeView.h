@@ -5,8 +5,10 @@
 #include <QTreeView>
 #include <QPersistentModelIndex>
 #include <QHash>
+#include <QPointer>
 #include <QRectF>
 #include <QStandardItemModel>
+#include <QVector>
 
 #include "components/foundation/FluentElement.h"
 #include "components/foundation/QMLPlus.h"
@@ -203,6 +205,23 @@ public:
     void collapseAll();
     void toggleExpanded(const QModelIndex& index);
 
+    // --- Row accessories ---
+    /**
+     * @brief Pins a widget to the right edge of a row and keeps it aligned while the view scrolls,
+     * lays out, or animates an expand/collapse reveal.
+     * The widget is reparented to the viewport and stays caller-owned; pass nullptr to detach it.
+     * The view hides it while the row is clipped, scrolled out, or too narrow to hold it.
+     * @param rightInset Distance between the row's right edge and the widget's right edge.
+     * zh_CN: 把控件固定在行右侧，并在滚动、布局与展开/收起动画中保持对齐。控件会重设父级到
+     * viewport 且仍由调用方持有；传 nullptr 解除固定。行被裁剪、滚出视口或宽度不足时由组件自动隐藏。
+     */
+    void setRowAccessoryWidget(const QModelIndex& index, QWidget* widget, int rightInset = 0);
+    /**
+     * @brief Returns the accessory widget pinned to this row.
+     * zh_CN: 返回固定在该行的附件控件。
+     */
+    QWidget* rowAccessoryWidget(const QModelIndex& index) const;
+
     // --- Selection API ---
     QModelIndex selectedItem() const;
     QModelIndexList selectedItems() const;
@@ -347,6 +366,9 @@ private:
 
     // --- Selected indicator pill geometry / painting ---
     QRectF selectedIndicatorBaseRect(const QModelIndex& index) const;
+    // Painted rect of a row, including the reveal shift and clip used by drawRow().
+    // zh_CN: 行实际绘制的矩形，包含 drawRow() 使用的展开/收起平移与裁剪。
+    QRect rowPaintedRect(const QModelIndex& index) const;
     // Rows after an animating subtree are painted shifted up, so the pill has to follow the
     // painted row rather than the post-expansion layout rect.
     // zh_CN: 展开/收起期间子树之后的行按向上平移的位置绘制，指示器要跟随绘制位置而非展开后的布局位置。
@@ -441,6 +463,15 @@ private:
     qreal m_animSubtreeHeight = 0.0;        // pixel height of the animating subtree
     bool m_pendingCollapseFinalize = false; // deferred collapse: actually collapse on finish
     bool m_paintingExpandRevealTail = false;
+
+    // --- Row accessory widgets ---
+    struct RowAccessory {
+        QPersistentModelIndex index;
+        QPointer<QWidget> widget;
+        int rightInset = 0;
+    };
+    void updateRowAccessories();
+    QVector<RowAccessory> m_rowAccessories;
 
 public:
     /** Query chevron rotation progress for delegate painting. 0=right, 1=down. */

@@ -320,6 +320,7 @@ void TreeView::setModel(QAbstractItemModel* model)
     clearExpandRevealState();
     QTreeView::setModel(model);
     connectIndicatorMotionModel(model);
+    updateRowAccessories();
 }
 
 void TreeView::setSelectionModel(QItemSelectionModel* selectionModel)
@@ -678,6 +679,11 @@ void TreeView::setHorizontalFluentScrollBarEnabled(bool enabled)
 
 void TreeView::paintEvent(QPaintEvent* event)
 {
+    // Accessories mirror the rows painted in this frame, so they stay aligned while scrolling,
+    // laying out, or revealing a subtree. zh_CN: 附件控件跟着本帧实际绘制的行移动，滚动、布局与
+    // 展开动画期间都保持对齐。
+    updateRowAccessories();
+
     const auto& c = themeColorsRef();
     const int r = CornerRadius::Control;
     // --- 1. Container background ---
@@ -834,6 +840,7 @@ void TreeView::resizeEvent(QResizeEvent* event)
     syncFluentScrollBar();
     syncFluentHScrollBar();
     layoutHeader();
+    updateRowAccessories();
 }
 
 void TreeView::showEvent(QShowEvent* event)
@@ -1016,6 +1023,120 @@ qreal TreeView::chevronRotation(const QModelIndex& index) const
         return qBound(0.0, m_expandRevealAnim->currentValue().toReal(), 1.0);
     }
     return isExpanded(index) ? 1.0 : 0.0;
+}
+
+QRect TreeView::rowPaintedRect(const QModelIndex& index) const
+{
+    if (!index.isValid() || index.model() != model())
+        return {};
+
+    const QRect rowRect = visualRect(index);
+    if (rowRect.isEmpty())
+        return {};
+
+    QRect painted = rowRect.translated(0, indicatorRowRevealOffset(index));
+    if (m_animParent.isValid() && m_expandRevealAnim && m_expandRevealAnim->state() == QAbstractAnimation::Running
+        && m_animSubtreeHeight > 0.0) {
+        const QModelIndex parent = QModelIndex(m_animParent);
+        const QRect parentRect = visualRect(parent);
+        if (!parentRect.isEmpty() && index != parent && isDescendantOf(index, parent)) {
+            // Rows inside the revealing subtree are painted clipped by the growing window edge.
+            // zh_CN: 展开窗口内的行按窗口边界被裁剪，窗口之外的部分不绘制。
+            const qreal progress = qBound(0.0, m_expandRevealAnim->currentValue().toReal(), 1.0);
+            const qreal boundaryY = parentRect.bottom() + 1.0 + m_animSubtreeHeight * progress;
+            painted.setBottom(qMin<int>(painted.bottom(), qFloor(boundaryY)));
+            if (painted.top() > painted.bottom())
+                return {};
+        }
+    }
+    return painted;
+}
+
+// ── Row accessory widgets ─────────────────────────────────────────────────────
+
+void TreeView::setRowAccessoryWidget(const QModelIndex& index, QWidget* widget, int rightInset)
+{
+    if (!viewport())
+        return;
+
+    // 同一行或同一控件只保留一份附件，避免重复定位。
+    for (int i = m_rowAccessories.size() - 1; i >= 0; --i) {
+        const RowAccessory& accessory = m_rowAccessories.at(i);
+        const bool sameRow = index.isValid() && accessory.index == index;
+        const bool sameWidget = widget && accessory.widget == widget;
+        if (!sameRow && !sameWidget)
+            continue;
+        // Re-pinning the same widget only refreshes the placement, so keep it on screen.
+        // zh_CN: 同一控件重新固定只是刷新位置，无需先隐藏。
+        if (!accessory.widget.isNull() && accessory.widget != widget)
+            accessory.widget->hide();
+        m_rowAccessories.removeAt(i);
+    }
+
+    if (widget && index.isValid()) {
+        if (widget->parentWidget() != viewport())
+            widget->setParent(viewport());
+        RowAccessory accessory;
+        accessory.index = QPersistentModelIndex(index);
+        accessory.widget = widget;
+        accessory.rightInset = qMax(0, rightInset);
+        m_rowAccessories.append(accessory);
+        widget->raise();
+    }
+    updateRowAccessories();
+}
+
+QWidget* TreeView::rowAccessoryWidget(const QModelIndex& index) const
+{
+    for (const RowAccessory& accessory : m_rowAccessories) {
+        if (accessory.index == index)
+            return accessory.widget.data();
+    }
+    return nullptr;
+}
+
+void TreeView::updateRowAccessories()
+{
+    // Drop attachments whose widget was destroyed by its owner or whose row is gone.
+    // zh_CN: 清理已被持有方销毁、或所在行已不存在的附件。
+    for (int i = m_rowAccessories.size() - 1; i >= 0; --i) {
+        const RowAccessory& accessory = m_rowAccessories.at(i);
+        if (accessory.widget && accessory.index.isValid())
+            continue;
+        if (accessory.widget)
+            accessory.widget->hide();
+        m_rowAccessories.removeAt(i);
+    }
+    if (m_rowAccessories.isEmpty() || !viewport())
+        return;
+
+    const QRect viewRect = viewport()->rect();
+    for (const RowAccessory& accessory : m_rowAccessories) {
+        QWidget* widget = accessory.widget;
+        if (!widget)
+            continue;
+
+        const QModelIndex index = accessory.index;
+        const QRect painted = rowPaintedRect(index);
+        QSize size = widget->size();
+        if (size.isEmpty())
+            size = widget->sizeHint();
+        const QRect rect(painted.right() + 1 - accessory.rightInset - size.width(),
+            painted.top() + (painted.height() - size.height()) / 2, size.width(), size.height());
+        if (widget->geometry() != rect)
+            widget->setGeometry(rect);
+
+        // A reveal-clipped row cannot be expressed by a child widget, so only fully painted rows
+        // keep their accessory visible. zh_CN: 被展开动画裁剪的行无法用子控件表达，只有完整绘制的行才显示附件。
+        const bool fullyPainted = !painted.isEmpty() && painted.height() == visualRect(index).height();
+        // Icon-rail rows are too narrow to host an accessory, so it disappears with the space it
+        // needs instead of hanging over the chevron. zh_CN: 图标栏行宽不足以容纳附件，附件随所需空间
+        // 一起消失，而不是压在箭头上。
+        const bool fitsRow = rect.left() >= painted.left();
+        const bool visible = fullyPainted && fitsRow && viewRect.intersects(rect);
+        if (widget->isHidden() == visible)
+            widget->setVisible(visible);
+    }
 }
 
 // ── Drag reorder: mouse events ───────────────────────────────────────────────

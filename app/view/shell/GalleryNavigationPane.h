@@ -78,7 +78,6 @@ private:
     void rebuild();
     void updateButtonStyles();
     void updateCompactRowVisibility();
-    void updateSpatialBadgeGeometry();
     void syncCompactVisualProperties();
     void updateDividerPalette();
     void startCompactVisualTransition(bool compact);
