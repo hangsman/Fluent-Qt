@@ -15,6 +15,7 @@
 #include <QEnterEvent>
 #include <QMouseEvent>
 #include <QResizeEvent>
+#include <QScrollBar>
 #include <QVariant>
 #include <QWindow>
 
@@ -471,6 +472,25 @@ QPoint logicalClientPointForNativeScreenPoint(QWidget* window, HWND hwnd, const 
     // 尺寸换算，不能把物理坐标直接交给 mapFromGlobal()。
     return QPoint(qFloor(static_cast<qreal>(nativeClientPoint.x) * logicalSize.width() / nativeWidth),
         qFloor(static_cast<qreal>(nativeClientPoint.y) * logicalSize.height() / nativeHeight));
+}
+
+// Overlay scroll bars sit flush with the frame, inside the resize band, so the band has to be
+// split: the outermost strip stays a resize handle, the rest belongs to the bar. Without the
+// split either the bar is unclickable or the window loses its right/bottom resize handle.
+// zh_CN: 叠加滚动条与窗框齐平、落在缩放边框内，必须拆分这条带：最外侧一小段留给拖拽缩放，
+// 其余交给滚动条。否则不是滚动条点不动，就是窗口失去右侧/底部的拖拽缩放区。
+constexpr int kResizeEdgeStrip = 3;
+
+bool scrollBarUnderPoint(QWidget* window, const QPoint& localPos)
+{
+    if (!window)
+        return false;
+    const QRect inner = window->rect().adjusted(kResizeEdgeStrip, kResizeEdgeStrip,
+        -kResizeEdgeStrip, -kResizeEdgeStrip);
+    if (!inner.contains(localPos))
+        return false;
+    const QWidget* child = window->childAt(localPos);
+    return child && qobject_cast<const QScrollBar*>(child);
 }
 
 // Windows routes HTMAXBUTTON input through the non-client path. Translate it
@@ -1116,6 +1136,11 @@ bool handlePlatformNativeEvent(QWidget* window,
             *result = HTMAXBUTTON;
             return true;
         }
+    } else if (scrollBarUnderPoint(window, localPos)) {
+        // The resize band overlaps overlay scroll bars; let the bar keep the click.
+        // zh_CN: 缩放边框与叠加滚动条重叠，此处的点击交给滚动条处理。
+        *result = HTCLIENT;
+        return true;
     }
 
     *result = static_cast<FluentNativeEventResult>(toNativeHitTest(hitTest));
