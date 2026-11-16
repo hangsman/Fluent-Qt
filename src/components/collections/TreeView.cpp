@@ -38,9 +38,8 @@ namespace fluent::collections {
 
 namespace {
 
-// Namespace-scope constant: no FluentElement instance, so read the raw token.
-// zh_CN: 命名空间级常量没有 FluentElement 实例，直接读原始 token。
-constexpr int kExpandRevealDuration = ::Animation::Duration::Fast;
+constexpr int kExpandRevealDuration = ::Animation::Duration::Normal;
+constexpr int kCollapseRevealDuration = ::Animation::Duration::Fast;
 
 // Pixels scrolled per wheel notch (delta 120), shared with the other collection views so
 // the wheel feel matches ListView. zh_CN: 每个滚轮刻度（delta 120）滚动的像素数，与 ListView 统一手感。
@@ -1563,6 +1562,10 @@ void TreeView::startExpandReveal(const QModelIndex& parent)
         clearExpandRevealState();
         return;
     }
+
+    // 展开：Standard（InOutSine），平滑起止，时长按剩余进度缩放。
+    // zh_CN: 展开用 Standard 缓动，时长按剩余进度缩放。
+    m_expandRevealAnim->setEasingCurve(themeAnimation().standard);
     const int duration = qMax(1, qRound(kExpandRevealDuration * (1.0 - resume)));
     m_expandRevealAnim->setStartValue(resume);
     m_expandRevealAnim->setEndValue(1.0);
@@ -1595,7 +1598,11 @@ void TreeView::startCollapseReveal(const QModelIndex& parent)
         setExpanded(parent, false);
         return;
     }
-    const int duration = qMax(1, qRound(kExpandRevealDuration * resume));
+
+    // 折叠：Decelerate（OutCubic），快速收掉、尾部柔和，时长按剩余进度缩放。
+    // zh_CN: 折叠用 Decelerate 缓动，快速收起、尾部柔和，时长按剩余进度缩放。
+    m_expandRevealAnim->setEasingCurve(themeAnimation().decelerate);
+    const int duration = qMax(1, qRound(kCollapseRevealDuration * resume));
     m_expandRevealAnim->setStartValue(resume);
     m_expandRevealAnim->setEndValue(0.0);
     ::fluent::detail::startMotionTransition(m_expandRevealAnim, duration, m_animEnabled);
